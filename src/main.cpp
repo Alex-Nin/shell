@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <span>
-#include "./../include/parsed_tokens.h"
+#include "./../include/Parsed_Tokens.h"
 
 using std::cout,
 std::cerr,
@@ -36,6 +36,11 @@ static Parsed_Tokens parse_input(string& input);
 static string handle_type(string command_string);
 static string find_in_path(const string& command);
 static bool is_executable(const fs::path& p);
+static void handle_pwd();
+static void handle_echo(const vector<string>& args);
+static void handle_cd(const vector<string>& args);
+static void handle_history(const vector<string>& args, const vector<string>& command_history);
+static void handle_external_command(const string& command, const vector<string>& args, const string& redirect_path, int stdval);
 
 enum Keywords {
   // Start with one because when we use .contains unordered_map member function any
@@ -100,104 +105,25 @@ int main() {
     command_history.push_back(input_string);
     switch (builtin_map[command]) {
       case ECHO:
-        for (auto& arg : args) {
-          // If its not that last arg add a space between args, otherwise dont concat a space
-          string string_to_be_added = (arg != args[args.size() - 1]) ? arg + " " : arg;
-          output += string_to_be_added;
-        }
-        cout << output << endl;
+        handle_echo(args);
         break;
       case TYPE:
-        output = handle_type(args[0]);
-        cout << output << endl;
+        cout << handle_type(args[0]) << endl;
         break;
       case CD:
-        if (args[0] == "~") {
-          // Get HOME env, convert to fs::path object, and set to current_path
-          string home_path = getenv("HOME");
-          file_path = fs::path(home_path);
-          fs::current_path(file_path);
-          break;
-        }
-        file_path = fs::path(args[0]);
-        if (!fs::exists(file_path)) {
-          cerr << "cd: " << file_path.c_str() << ": No such file or directory" << endl;
-          break;
-        }
-        if (file_path.is_absolute()) {
-          fs::current_path(file_path);
-        } else { // else if (file_path.is_relative()){
-          // Get the absolute path from the relative and set it to current_path
-          file_path = fs::absolute(file_path);
-          fs::current_path(file_path);
-        }
+        handle_cd(args);
         break;
       case PWD:
-        cout << fs::current_path().string() << endl;
+        handle_pwd();
         break;
       case HISTORY:
-        {
-          int start = 0;
-          if (args.size() > 0) {
-            // ***try - except might be a good idea here
-            int amount_to_view = stoi(args[0]);
-            if (amount_to_view >= command_history.size()) {
-              start = command_history.size();
-            }
-            else {
-              start = command_history.size() - amount_to_view;
-            }
-          }
-          for (int i = start; i < command_history.size(); i++) {
-            cout << "\t" << i << "  " << command_history[i] << endl;
-          }
-          break;
-        }
+        handle_history(args, command_history);
+        break;
       case EXIT:
         is_done = true;
         break;
       default: // File path to a program (like cat or ls) or not a command
-        string exe_path = find_in_path(command);
-        if (exe_path != "") {
-          vector<char*> argv;
-          // Reserve space in the vector
-          // The + 1 (plus one) is for the null pointer
-          // the execv function requires a char* array that is null terminated
-          // meaning the last entry has to be a nullptr
-          argv.reserve(args.size() + 1);
-          argv.push_back(command.data());
-          for (auto& s : args) {
-            argv.push_back(s.data()); // data() returns char* of string
-          }
-          argv.push_back(nullptr);
-          char* const* pargs = argv.data();
-
-          int status = 0;
-          pid_t child_pid;
-          cout.flush();
-          child_pid = fork();
-
-          if (child_pid == 0) {
-            if (!redirect_path.empty()) {
-              int fd = open(redirect_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-              if (dup2(fd, stdval) == -1) {cout << "fd: " << fd << " Path: " << redirect_path << " Redirect FAILED!" << endl;}
-              close(fd);
-              // cout << " Path: " << redirect_path << endl;
-            }
-            // The following tests wheather redirect works or not
-            //write(stdval, "REDIRECT NOT OK\n", 16);
-            execv(exe_path.c_str(), pargs);
-            perror("execv failed");
-            _exit(127);
-          }
-          else {
-            waitpid(child_pid, &status, 0);
-          }
-        }
-        else {
-          cerr << command << ": command not found" << endl;
-        }
-        
+        handle_external_command(command, args, redirect_path, stdval);
         break;
     }if (!redirect_path.empty()) {
       dup2(original_buffer, stdval);
@@ -300,7 +226,6 @@ static Parsed_Tokens parse_input(string& input) {
         redirect_symbol = ">";
       }
     }
-    else if (input.substr(left+1, 3) == "1>>" || input.substr(left + 1, 3) == "2>>" || input[right] == '>')
     else {
       word_in_window += input[right];
       is_escaping_next_char = false;
@@ -323,6 +248,18 @@ static Parsed_Tokens parse_input(string& input) {
   Parsed_Tokens parsed{command, word_list, redirect_path, redirect_symbol};
   return parsed;
 };
+
+static void handle_echo(const vector<string>& args) {
+  string output = "";
+  for (size_t i = 0; i < args.size(); i++) {
+    // If its not that last arg add a space between args, otherwise dont concat a space
+    output += args[i];
+    if (i != args.size() - 1) {
+      output += " ";
+    }
+  }
+  cout << output << endl;
+}
  
 static string handle_type(string command_string) {
   string output = "";
@@ -340,6 +277,94 @@ static string handle_type(string command_string) {
 
   output = command_string + ": not found";
   return output;
+}
+
+static void handle_cd(const vector<string>& args) {
+  fs::path file_path;
+  // Get HOME env, convert to fs::path object, and set to current_path
+  if (args[0] == "~") {
+    string home_path = getenv("HOME");
+    file_path = fs::path(home_path);
+    fs::current_path(file_path);
+    return;
+  }
+  
+  file_path = fs::path(args[0]);
+  if (!fs::exists(file_path)) {
+    cerr << "cd: " << file_path.c_str() << ": No such file or directory" << endl;
+    return;
+  }
+  
+  if (file_path.is_absolute()) {
+    fs::current_path(file_path);
+  } else {// else if (file_path.is_relative()){
+          // Get the absolute path from the relative and set it to current_path
+    file_path = fs::absolute(file_path);
+    fs::current_path(file_path);
+  }
+}
+
+static void handle_pwd() {
+  cout << fs::current_path().string() << endl;
+}
+
+static void handle_history(const vector<string>& args, const vector<string>& command_history) {
+  // ***try - except might be a good idea here
+  int start = 0;
+  if (args.size() > 0) {
+    int amount_to_view = stoi(args[0]);
+    if (amount_to_view >= static_cast<int>(command_history.size())) {
+      start = 0;
+    } else {
+      start = command_history.size() - amount_to_view;
+    }
+  }
+  for (size_t i = start; i < command_history.size(); i++) {
+    cout << "\t" << i << "  " << command_history[i] << endl;
+  }
+}
+
+static void handle_external_command(const string& command, const vector<string>& args, const string& redirect_path, int stdval) {
+  string exe_path = find_in_path(command);
+  if (exe_path.empty()) {
+    cerr << command << ": command not found" << endl;
+    return;
+  }
+
+  vector<char*> argv;
+  // Reserve space in the vector
+  // The + 1 (plus one) is for the null pointer
+  // the execv function requires a char* array that is null terminated
+  // meaning the last entry has to be a nullptr
+  argv.reserve(args.size() + 2);
+  argv.push_back(const_cast<char*>(command.data())); // data() returns char* of string
+  for (const auto& s : args) {
+    argv.push_back(const_cast<char*>(s.data()));
+  }
+  argv.push_back(nullptr);
+  char* const* pargs = argv.data();
+
+  int status = 0;
+  pid_t child_pid;
+  cout.flush();
+  child_pid = fork();
+
+  if (child_pid == 0) {
+    if (!redirect_path.empty()) {
+      int fd = open(redirect_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (dup2(fd, stdval) == -1) {
+        cout << "fd: " << fd << " Path: " << redirect_path << " Redirect FAILED!" << endl;
+      }
+      close(fd);
+    }
+    // The following tests wheather redirect works or not
+    //write(stdval, "REDIRECT NOT OK\n", 16);
+    execv(exe_path.c_str(), pargs);
+    perror("execv failed");
+    _exit(127);
+  } else {
+    waitpid(child_pid, &status, 0);
+  }
 }
 
 static string find_in_path(const string& command) {
@@ -367,9 +392,3 @@ static bool is_executable(const fs::path& full_path) {
           (perms & fs::perms::group_exec) != fs::perms::none ||
           (perms & fs::perms::others_exec) != fs::perms::none;
 }
-
-/*
-git add .
-git commit --allow-empty -m "Stage 22: Submission 1. "
-git push origin master
- */
