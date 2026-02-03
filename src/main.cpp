@@ -31,6 +31,48 @@ std::streambuf;
 
 namespace fs = std::filesystem;
 
+class RedirectManager {
+private:
+  string path;
+  int original_fd = -1;
+  int target_fd = -1;
+  bool active = false;
+
+public:
+  RedirectManager(const string& r_path, const string& symbol) : path(r_path) {
+    if (path.empty()) return;
+
+    if (symbol == "2>") {
+      target_fd = STDERR_FILENO;
+    }
+    else {
+      target_fd = STDOUT_FILENO;
+    }
+
+    original_fd = dup(target_fd);
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd != -1) {
+      dup2(fd, target_fd);
+      close(fd);
+      active = true;
+    }
+  }
+
+  ~RedirectManager() {
+    if (active && original_fd != -1) {
+      dup2(original_fd, target_fd);
+      close(original_fd);
+    }
+  }
+
+  RedirectManager(const RedirectManager&) = delete;
+  RedirectManager& operator=(const RedirectManager&) = delete;
+
+  int get_target_fd() const {return target_fd;}
+  bool is_active() const {return active;}
+  const string& get_path() const {return path;}
+};
+
 enum Commands {
   // Start with one because when we use .contains unordered_map member function any
   // key that isn't in the map will return 0, which will throw off the logic if we
@@ -40,7 +82,7 @@ enum Commands {
   EXIT,
   PWD,
   CD,
-  HISTORY
+  HIST
   
 };
 
@@ -56,13 +98,13 @@ static string find_in_path(const string& command);
 static bool is_executable(const fs::path& p);
 
 // handlers
-static void handle_echo(const vector<string>& args, ShellContext& shell_ctx);
-static void handle_type(const vector<string>& args, ShellContext& shell_ctx);
-static void handle_cd(const vector<string>& args, ShellContext& shell_ctx);
-static void handle_pwd(const vector<string>& args, ShellContext& shell_ctx);
+static void handle_echo(const vector<string>& args, ShellContext& shell_ctx); // wont use context
+static void handle_type(const vector<string>& args, ShellContext& shell_ctx); // from string to vector<string> and return void
+static void handle_cd(const vector<string>& args, ShellContext& shell_ctx); // wont use context
+static void handle_pwd(const vector<string>& args, ShellContext& shell_ctx); // wont use either
 static void handle_history(const vector<string>& args, ShellContext& shell_ctx);
-static void handle_exit(const vector<string>& args, ShellContext& shell_ctx);
-static void handle_external_command(const string& command, const vector<string>& args, const string& redirect_path, int stdval);
+static void handle_exit(const vector<string>& args, ShellContext& shell_ctx); // wont use args
+static void handle_external_command(const string& command, const vector<string>& args, const RedirectManager& redirect);
 
 int main() {
   // Flush after every std::cout / std:cerr
@@ -70,6 +112,7 @@ int main() {
   cerr << std::unitbuf;
 
   ShellContext shell_ctx;
+  
   shell_ctx.builtin_map["echo"] = ECHO;
   shell_ctx.builtin_map["type"] = TYPE;
   shell_ctx.builtin_map["exit"] = EXIT;
@@ -88,28 +131,9 @@ int main() {
     vector<string> args = parsed_input.args;
     string redirect_path = parsed_input.redirect;
     string redirect_symbol = parsed_input.redirect_symbol;
-    int stdval;
-    int original_buffer;
-
     
-    if (!redirect_path.empty()) {
-      if (redirect_symbol == "2>") {
-        original_buffer = dup(STDERR_FILENO);
-        stdval = STDERR_FILENO;
-      }else {
-        original_buffer = dup(STDOUT_FILENO);
-        stdval = STDOUT_FILENO;
-      }
-      // Set up redirect for non-default commands (echo, cd, pwd, etc.)
-      if (shell_ctx.builtin_map[command]) {
-        int fd = open(redirect_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        dup2(fd, stdval);
-        close(fd);
-      }
-    }
-    string output = "";
-    fs::path file_path;
     shell_ctx.command_history.push_back(input_string);
+    RedirectManager redirect(redirect_path, redirect_symbol);
     switch (shell_ctx.builtin_map[command]) {
       case ECHO: handle_echo(args, shell_ctx); break;
       case TYPE: handle_type(args, shell_ctx); break;
@@ -118,13 +142,8 @@ int main() {
       case HIST: handle_history(args, shell_ctx); break;
       case EXIT: handle_exit(args, shell_ctx); break;
       // File path to a program (like cat or ls) or not a command
-      default: handle_external_command(command, args, redirect_path, stdval); break;
-    }if (!redirect_path.empty()) {
-      dup2(original_buffer, stdval);
-      close(original_buffer);
+      default: handle_external_command(command, args, redirect); break;
     }
-    output = "";
-    
   }
 }
 
@@ -320,7 +339,7 @@ static void handle_exit(const vector<string>& args, ShellContext& shell_ctx) {
   shell_ctx.is_done = true;
 }
 
-static void handle_external_command(const string& command, const vector<string>& args, const string& redirect_path, int stdval) {
+static void handle_external_command(const string& command, const vector<string>& args, const RedirectManager& redirect) {
   string exe_path = find_in_path(command);
   if (exe_path.empty()) {
     cerr << command << ": command not found" << endl;
@@ -346,11 +365,9 @@ static void handle_external_command(const string& command, const vector<string>&
   child_pid = fork();
 
   if (child_pid == 0) {
-    if (!redirect_path.empty()) {
-      int fd = open(redirect_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-      if (dup2(fd, stdval) == -1) {
-        cout << "fd: " << fd << " Path: " << redirect_path << " Redirect FAILED!" << endl;
-      }
+    if (redirect.is_active()) {
+      int fd = open(redirect.get_path().c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      dup2(fd, redirect.get_target_fd());
       close(fd);
     }
     // The following tests wheather redirect works or not
