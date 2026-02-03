@@ -92,8 +92,17 @@ struct ShellContext {
   bool is_done = false;
 };
 
+struct Command {
+  string name;
+  vector<string> args;
+  string redirect_path;
+  string redirect_symbol;
+
+  bool has_redirect() const {return !redirect_path.empty();}
+};
+
 static vector<string> get_input();
-static Parsed_Tokens parse_input(string& input);
+static Command parse_input(const string& input);
 static string find_in_path(const string& command);
 static bool is_executable(const fs::path& p);
 
@@ -126,28 +135,24 @@ int main() {
     cout << "$ ";
     string input_string;
     std::getline(cin, input_string);
-    Parsed_Tokens parsed_input = parse_input(input_string);
-    string command = parsed_input.command;
-    vector<string> args = parsed_input.args;
-    string redirect_path = parsed_input.redirect;
-    string redirect_symbol = parsed_input.redirect_symbol;
+    Command cmd = parse_input(input_string);
     
     shell_ctx.command_history.push_back(input_string);
-    RedirectManager redirect(redirect_path, redirect_symbol);
-    switch (shell_ctx.builtin_map[command]) {
-      case ECHO: handle_echo(args, shell_ctx); break;
-      case TYPE: handle_type(args, shell_ctx); break;
-      case CD: handle_cd(args, shell_ctx); break;
-      case PWD: handle_pwd(args, shell_ctx); break;
-      case HIST: handle_history(args, shell_ctx); break;
-      case EXIT: handle_exit(args, shell_ctx); break;
+    RedirectManager redirect(cmd.redirect_path, cmd.redirect_symbol);
+    switch (shell_ctx.builtin_map[cmd.name]) {
+      case ECHO: handle_echo(cmd.args, shell_ctx); break;
+      case TYPE: handle_type(cmd.args, shell_ctx); break;
+      case CD: handle_cd(cmd.args, shell_ctx); break;
+      case PWD: handle_pwd(cmd.args, shell_ctx); break;
+      case HIST: handle_history(cmd.args, shell_ctx); break;
+      case EXIT: handle_exit(cmd.args, shell_ctx); break;
       // File path to a program (like cat or ls) or not a command
-      default: handle_external_command(command, args, redirect); break;
+      default: handle_external_command(cmd.name, cmd.args, redirect); break;
     }
   }
 }
 
-static Parsed_Tokens parse_input(string& input) {
+static Command parse_input(const string& input) {
   vector<string> word_list; // Holds a list of all arguments passed into the program
   string word_in_window;
   bool is_inside_single_quote = false;
@@ -256,10 +261,13 @@ static Parsed_Tokens parse_input(string& input) {
     }
   }
 
-  string command = word_list.front();
+  Command cmd;
+  cmd.name = word_list.front();
   word_list.erase(word_list.begin());
-  Parsed_Tokens parsed{command, word_list, redirect_path, redirect_symbol};
-  return parsed;
+  cmd.args = word_list;
+  cmd.redirect_path = redirect_path;
+  cmd.redirect_symbol = redirect_symbol;
+  return cmd;
 };
 
 static void handle_echo(const vector<string>& args, ShellContext& shell_ctx) {
