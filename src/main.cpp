@@ -56,12 +56,12 @@ static string find_in_path(const string& command);
 static bool is_executable(const fs::path& p);
 
 // handlers
-static void handle_pwd();
-static void handle_echo(const vector<string>& args);
-static string handle_type(string command_string, ShellContext& shell_ctx);
-static void handle_cd(const vector<string>& args);
+static void handle_echo(const vector<string>& args, ShellContext& shell_ctx);
+static void handle_type(const vector<string>& args, ShellContext& shell_ctx);
+static void handle_cd(const vector<string>& args, ShellContext& shell_ctx);
+static void handle_pwd(const vector<string>& args, ShellContext& shell_ctx);
 static void handle_history(const vector<string>& args, ShellContext& shell_ctx);
-static void handle_exit(ShellContext& shell_ctx);
+static void handle_exit(const vector<string>& args, ShellContext& shell_ctx);
 static void handle_external_command(const string& command, const vector<string>& args, const string& redirect_path, int stdval);
 
 int main() {
@@ -75,7 +75,7 @@ int main() {
   shell_ctx.builtin_map["exit"] = EXIT;
   shell_ctx.builtin_map["pwd"] = PWD;
   shell_ctx.builtin_map["cd"] = CD;
-  shell_ctx.builtin_map["history"] = HISTORY;
+  shell_ctx.builtin_map["history"] = HIST;
   
   // REPL Loop
   while (!shell_ctx.is_done) {
@@ -111,27 +111,14 @@ int main() {
     fs::path file_path;
     shell_ctx.command_history.push_back(input_string);
     switch (shell_ctx.builtin_map[command]) {
-      case ECHO:
-        handle_echo(args);
-        break;
-      case TYPE:
-        cout << handle_type(args[0], shell_ctx) << endl;
-        break;
-      case CD:
-        handle_cd(args);
-        break;
-      case PWD:
-        handle_pwd();
-        break;
-      case HISTORY:
-        handle_history(args, shell_ctx);
-        break;
-      case EXIT:
-        shell_ctx.is_done = true;
-        break;
-      default: // File path to a program (like cat or ls) or not a command
-        handle_external_command(command, args, redirect_path, stdval);
-        break;
+      case ECHO: handle_echo(args, shell_ctx); break;
+      case TYPE: handle_type(args, shell_ctx); break;
+      case CD: handle_cd(args, shell_ctx); break;
+      case PWD: handle_pwd(args, shell_ctx); break;
+      case HIST: handle_history(args, shell_ctx); break;
+      case EXIT: handle_exit(args, shell_ctx); break;
+      // File path to a program (like cat or ls) or not a command
+      default: handle_external_command(command, args, redirect_path, stdval); break;
     }if (!redirect_path.empty()) {
       dup2(original_buffer, stdval);
       close(original_buffer);
@@ -256,7 +243,7 @@ static Parsed_Tokens parse_input(string& input) {
   return parsed;
 };
 
-static void handle_echo(const vector<string>& args) {
+static void handle_echo(const vector<string>& args, ShellContext& shell_ctx) {
   string output = "";
   for (size_t i = 0; i < args.size(); i++) {
     // If its not that last arg add a space between args, otherwise dont concat a space
@@ -268,25 +255,23 @@ static void handle_echo(const vector<string>& args) {
   cout << output << endl;
 }
  
-static string handle_type(string command_string, ShellContext& shell_ctx) {
+static void handle_type(const vector<string>& args, ShellContext& shell_ctx) {
   string output = "";
-  if (shell_ctx.builtin_map.contains(command_string)) {
-      output = command_string + " is a shell builtin";
-      return output;
+  if (shell_ctx.builtin_map.contains(args[0])) {
+      cout << args[0] << " is a shell builtin" << endl;
+      return;
   }
 
-  output = find_in_path(command_string);
+  output = find_in_path(args[0]);
   if (output != "") {
-      return (command_string + " is ") += output;
-      // output is a file systems object
-      // using += because file system paths override operator+= NOT operator+
+      cout << args[0] << " is " << output << endl;
+      return;
   }
 
-  output = command_string + ": not found";
-  return output;
+  cout << args[0] << ": not found" << endl;
 }
 
-static void handle_cd(const vector<string>& args) {
+static void handle_cd(const vector<string>& args, ShellContext& shell_ctx) {
   fs::path file_path;
   // Get HOME env, convert to fs::path object, and set to current_path
   if (args[0] == "~") {
@@ -311,7 +296,7 @@ static void handle_cd(const vector<string>& args) {
   }
 }
 
-static void handle_pwd() {
+static void handle_pwd(const vector<string>& args, ShellContext& shell_ctx) {
   cout << fs::current_path().string() << endl;
 }
 
@@ -331,7 +316,7 @@ static void handle_history(const vector<string>& args, ShellContext& shell_ctx) 
   }
 }
 
-static void handle_exit(ShellContext& shell_ctx) {
+static void handle_exit(const vector<string>& args, ShellContext& shell_ctx) {
   shell_ctx.is_done = true;
 }
 
