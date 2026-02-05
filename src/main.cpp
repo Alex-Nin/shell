@@ -30,6 +30,10 @@ std::streambuf;
 
 namespace fs = std::filesystem;
 
+struct ShellContext;
+
+using HandlerFunc = void(*)(const vector<string>&, ShellContext&);
+
 class RedirectManager {
 private:
   string path;
@@ -72,21 +76,8 @@ public:
   const string& get_path() const {return path;}
 };
 
-enum Commands {
-  // Start with one because when we use .contains unordered_map member function any
-  // key that isn't in the map will return 0, which will throw off the logic if we
-  // start the enum with 0.
-  ECHO = 1,
-  TYPE,
-  EXIT,
-  PWD,
-  CD,
-  HIST
-  
-};
-
 struct ShellContext {
-  unordered_map<string, Commands> builtin_map;
+  unordered_map<string, HandlerFunc> handlers;
   vector<string> command_history;
   bool is_done = false;
 };
@@ -126,6 +117,7 @@ static void handle_history(const vector<string>& args, ShellContext& shell_ctx);
 static void handle_exit(const vector<string>& args, ShellContext& shell_ctx); // wont use args
 static void handle_external_command(const string& command, const vector<string>& args, const RedirectManager& redirect);
 
+static void register_builtins(ShellContext& shell_ctx);
 static string find_in_path(const string& command);
 static bool is_executable(const fs::path& p);
 
@@ -135,14 +127,8 @@ int main() {
   cerr << std::unitbuf;
 
   ShellContext shell_ctx;
-  
-  shell_ctx.builtin_map["echo"] = ECHO;
-  shell_ctx.builtin_map["type"] = TYPE;
-  shell_ctx.builtin_map["exit"] = EXIT;
-  shell_ctx.builtin_map["pwd"] = PWD;
-  shell_ctx.builtin_map["cd"] = CD;
-  shell_ctx.builtin_map["history"] = HIST;
-  
+  register_builtins(shell_ctx);
+
   // REPL Loop
   while (!shell_ctx.is_done) {
     
@@ -153,17 +139,23 @@ int main() {
     
     shell_ctx.command_history.push_back(input_string);
     RedirectManager redirect(cmd.redirect_path, cmd.redirect_symbol);
-    switch (shell_ctx.builtin_map[cmd.name]) {
-      case ECHO: handle_echo(cmd.args, shell_ctx); break;
-      case TYPE: handle_type(cmd.args, shell_ctx); break;
-      case CD: handle_cd(cmd.args, shell_ctx); break;
-      case PWD: handle_pwd(cmd.args, shell_ctx); break;
-      case HIST: handle_history(cmd.args, shell_ctx); break;
-      case EXIT: handle_exit(cmd.args, shell_ctx); break;
-      // File path to a program (like cat or ls) or not a command
-      default: handle_external_command(cmd.name, cmd.args, redirect); break;
+
+    auto it = shell_ctx.handlers.find(cmd.name);
+    if (it != shell_ctx.handlers.end()) {
+      it->second(cmd.args, shell_ctx);
+    } else {
+      handle_external_command(cmd.name, cmd.args, redirect);
     }
   }
+}
+
+static void register_builtins(ShellContext& shell_ctx) {
+  shell_ctx.handlers["echo"] = handle_echo;
+  shell_ctx.handlers["type"] = handle_type;
+  shell_ctx.handlers["exit"] = handle_exit;
+  shell_ctx.handlers["pwd"] = handle_pwd;
+  shell_ctx.handlers["cd"] = handle_cd;
+  shell_ctx.handlers["history"] = handle_history;
 }
 
 static void handle_echo(const vector<string>& args, ShellContext& shell_ctx) {
@@ -180,7 +172,7 @@ static void handle_echo(const vector<string>& args, ShellContext& shell_ctx) {
  
 static void handle_type(const vector<string>& args, ShellContext& shell_ctx) {
   string output = "";
-  if (shell_ctx.builtin_map.contains(args[0])) {
+  if (shell_ctx.handlers.contains(args[0])) {
       cout << args[0] << " is a shell builtin" << endl;
       return;
   }
