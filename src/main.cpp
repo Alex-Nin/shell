@@ -100,10 +100,22 @@ struct Command {
   bool has_redirect() const {return !redirect_path.empty();}
 };
 
-static vector<string> get_input();
-static Command parse_input(const string& input);
-static string find_in_path(const string& command);
-static bool is_executable(const fs::path& p);
+struct TokenizerState {
+  bool in_single_quote = false;
+  bool in_double_quote = false;
+  bool escape_next = false;
+};
+
+struct Token {
+  string value;
+  bool is_redirect_op = false;
+};
+
+// Tokenizers and parsers
+static Command tokenize_and_parse(const string& input);
+static bool process_char(char c, char next_char, string& current_token, TokenizerState& state);
+static vector<Token> tokenize(const string& input);
+static Command parse_tokens(const vector<Token>& tokens);
 
 // handlers
 static void handle_echo(const vector<string>& args, ShellContext& shell_ctx); // wont use context
@@ -113,6 +125,9 @@ static void handle_pwd(const vector<string>& args, ShellContext& shell_ctx); // 
 static void handle_history(const vector<string>& args, ShellContext& shell_ctx);
 static void handle_exit(const vector<string>& args, ShellContext& shell_ctx); // wont use args
 static void handle_external_command(const string& command, const vector<string>& args, const RedirectManager& redirect);
+
+static string find_in_path(const string& command);
+static bool is_executable(const fs::path& p);
 
 int main() {
   // Flush after every std::cout / std:cerr
@@ -134,7 +149,7 @@ int main() {
     cout << "$ ";
     string input_string;
     std::getline(cin, input_string);
-    Command cmd = parse_input(input_string);
+    Command cmd = tokenize_and_parse(input_string);
     
     shell_ctx.command_history.push_back(input_string);
     RedirectManager redirect(cmd.redirect_path, cmd.redirect_symbol);
@@ -150,124 +165,6 @@ int main() {
     }
   }
 }
-
-static Command parse_input(const string& input) {
-  vector<string> word_list; // Holds a list of all arguments passed into the program
-  string word_in_window;
-  bool is_inside_single_quote = false;
-  bool is_inside_double_quote = false;
-  bool escape_next_char = false;
-  bool is_redirecting = false;
-  bool is_escaping_next_char = false;
-  string redirect_symbol;
-  int char_index = 0;
-  int left = 0;
-  int right = 0;
-  while (left <= right && right < input.size()) {
-    // Rethink this, potentially use flags for the quotes
-    if (input[right] == ' ') {
-      if (!is_inside_single_quote && !is_inside_double_quote && !is_escaping_next_char) {
-        if (!word_in_window.empty()) {
-          word_list.push_back(word_in_window);
-          word_in_window = "";
-          left = right;
-        }
-      }// hello 'world' word = hello; word_list = {hello} word = ""; input[left] = ' ' input[right] = ' (after incrementing at the end)
-      else {
-        word_in_window += input[right];
-        is_escaping_next_char = false;
-      }
-    } // hello 'world'
-    else if (input[right] == '\'') { /* ' */
-      if (is_inside_double_quote || is_escaping_next_char) {
-        word_in_window += input[right];
-        is_escaping_next_char = false;
-      }
-      else if(!is_inside_single_quote && !is_inside_double_quote) {
-        is_inside_single_quote = !is_inside_single_quote;
-        left = right;
-      }
-      else if (is_inside_single_quote) {
-        is_inside_single_quote = !is_inside_single_quote;
-        left = right;
-      }
-    }
-    else if (input[right] == '"') { /* " */
-      if (is_inside_single_quote || is_escaping_next_char) {
-        word_in_window += input[right];
-        is_escaping_next_char = false;
-      }
-      else if (!is_inside_double_quote && !is_inside_single_quote) {
-        is_inside_double_quote = !is_inside_double_quote;
-        left = right;
-      }
-      else if (is_inside_double_quote) {
-        is_inside_double_quote = !is_inside_double_quote;
-        left = right;
-      }
-    }
-    else if (input[right] == '\\') { /* \ */
-      if (!is_inside_single_quote && !is_inside_double_quote && !is_escaping_next_char) {
-        is_escaping_next_char = true;
-      }
-      else if (is_escaping_next_char) {
-        word_in_window += input[right];
-        is_escaping_next_char = false;
-      }
-      else if (is_inside_double_quote) {
-          // Escape only certain chars
-          if (right < input.size() - 1) { // size = 3 [0],[1],[2]; right = 1; right < 3 - 1; right < 2
-            if (input[right+1] == '"' || input[right+1] == '\\') {
-              is_escaping_next_char = true;
-            }
-            else {
-              word_in_window += input[right];
-            }
-          }
-      }
-      else if (is_inside_single_quote) { /*else*/
-        word_in_window += input[right];
-      }
-    }
-    else if (input.substr(left+1, 2) == "1>" || input.substr(left + 1, 2) == "2>" || input[right] == '>') { // 1> or >
-      if (is_redirecting)
-      {
-        left = right;
-      }
-      else if (input.substr(left + 1, 2) == "2>") {
-        is_redirecting = true;
-        redirect_symbol = "2>";
-      }
-      else { // "1>" or ">"
-        is_redirecting = true;
-        redirect_symbol = ">";
-      }
-    }
-    else {
-      word_in_window += input[right];
-      is_escaping_next_char = false;
-    }
-    right++;
-  }
-
-  string redirect_path = "";
-  if (word_in_window.size() > 0) {
-    if (is_redirecting) {
-      redirect_path = word_in_window;
-    }
-    else {
-      word_list.push_back(word_in_window);
-    }
-  }
-
-  Command cmd;
-  cmd.name = word_list.front();
-  word_list.erase(word_list.begin());
-  cmd.args = word_list;
-  cmd.redirect_path = redirect_path;
-  cmd.redirect_symbol = redirect_symbol;
-  return cmd;
-};
 
 static void handle_echo(const vector<string>& args, ShellContext& shell_ctx) {
   string output = "";
@@ -353,6 +250,7 @@ static void handle_external_command(const string& command, const vector<string>&
     return;
   }
 
+  //cout << "Command: " << command << " Exe path: " << exe_path << endl;
   vector<char*> argv;
   // Reserve space in the vector
   // The + 1 (plus one) is for the null pointer
@@ -378,13 +276,153 @@ static void handle_external_command(const string& command, const vector<string>&
       close(fd);
     }
     // The following tests wheather redirect works or not
-    //write(stdval, "REDIRECT NOT OK\n", 16);
+    // write(redirect.get_target_fd(), "REDIRECT NOT OK\n", 16);
     execv(exe_path.c_str(), pargs);
     perror("execv failed");
     _exit(127);
   } else {
     waitpid(child_pid, &status, 0);
   }
+}
+
+static Command tokenize_and_parse(const string& input) {
+  vector<Token> tokens = tokenize(input);
+  return parse_tokens(tokens);
+};
+
+static bool process_char(char c, char next_char, string& current_token, TokenizerState& state) {
+  // Here we are escaping the current char
+  if (state.escape_next) {
+    current_token += c;
+    state.escape_next = false;
+    return true;
+  }
+
+  if (c == ' ') {
+    if (state.in_single_quote || state.in_double_quote) {
+      current_token += c;
+      return true;
+    }
+    // If not in any quotes or being escaped then it acts as a delimiter
+    return false;
+  }
+
+  // Handle single quotes
+  if (c == '\'') {
+    if (state.in_double_quote) {
+      current_token += c;
+    } else {
+      state.in_single_quote = !state.in_single_quote;
+    }
+    return true;
+  }
+
+  // Handle double quotes
+  if (c == '"') {
+    if (state.in_single_quote) {
+      current_token += c;
+    } else {
+      state.in_double_quote = !state.in_double_quote;
+    }
+
+    return true;
+  }
+
+  // Blacklash
+  if (c == '\\') {
+    if (state.in_single_quote) {
+      current_token += c;
+    } else if (state.in_double_quote) {
+      if (next_char == '"' || next_char == '\\') {
+        state.escape_next = true;
+      } else {
+        current_token += c;
+      }
+    } else {
+      state.escape_next = true;
+    }
+    return true;
+  }
+
+  // Non-special char
+  current_token += c;
+  return true;
+}
+
+static vector<Token> tokenize(const string& input) {
+  vector<Token> tokens;
+  string current;
+  TokenizerState state;
+  for (int i = 0; i < input.size(); i++) {
+    char c = input[i];
+    char next = (i + 1 < input.size()) ? input[i + 1] : '\0';
+
+    if (!state.in_single_quote && !state.in_double_quote && !state.escape_next) {
+
+      if ((c == '1' || c == '2') && next == '>') {
+        if (!current.empty()) {
+          tokens.push_back({current, false});
+          current.clear();
+        }
+        string op;
+        op += c;
+        op += '>';
+        tokens.push_back({op, true});
+        i++;
+        continue;
+      }
+
+      if (c == '>') {
+        if (!current.empty()) {
+          tokens.push_back({current, false});
+          current.clear();
+        }
+        tokens.push_back({">", true});
+        continue;
+      }
+    }
+
+    bool was_appened = process_char(c, next, current, state);
+
+    if (!was_appened && !current.empty()) {
+      tokens.push_back({current, false});
+      current.clear();
+    }
+  }
+
+  if (!current.empty()) {
+    tokens.push_back({current, false});
+  }
+
+  return tokens;
+}
+
+static Command parse_tokens(const vector<Token>& tokens) {
+  Command cmd;
+  bool expect_redirect_path = false;
+  string pending_redirect_symbol;
+
+  for (const auto& token : tokens) {
+    if (token.is_redirect_op) {
+      expect_redirect_path = true;
+      pending_redirect_symbol = token.value;
+      continue;
+    }
+    if (expect_redirect_path) {
+      cmd.redirect_path = token.value;
+      cmd.redirect_symbol = pending_redirect_symbol;
+      expect_redirect_path = false;
+      continue;
+    }
+
+    if (cmd.name.empty()) {
+      cmd.name = token.value;
+    } else {
+      cmd.args.push_back(token.value);
+    }
+  }
+
+  return cmd;
 }
 
 static string find_in_path(const string& command) {
