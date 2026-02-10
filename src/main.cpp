@@ -1,10 +1,10 @@
 // C and POSIX Headers/Libraries
-#include <unistd.h> // getcwd(),
 #include <stdlib.h> // chdir(), 
 #include <errno.h>
 #include <sys/wait.h> // waitpid(),
 #include <fcntl.h>
 #include <stdio.h>
+#include <unistd.h> // STDERR, STDOUT
 
 // C++ Headers/Libraries
 #include <iostream>
@@ -14,8 +14,8 @@
 #include <vector>
 #include <unordered_map>
 #include <filesystem>
-#include <span>
 
+// Type aliasing
 using std::cout,
 std::cerr,
 std::cin,
@@ -28,32 +28,48 @@ std::ofstream,
 std::ifstream,
 std::streambuf;
 
+// Namespacing
 namespace fs = std::filesystem;
 
+// Class/struct prototypes
+class RedirectManager;
 struct ShellContext;
+struct Command;
+struct TokenizerState;
+struct Token;
 
+// FUNCTION PROTOTYPES
+
+// Handler for function mapping
 using HandlerFunc = void(*)(const vector<string>&, ShellContext&);
 
+// CLASS/STRUCT OBJECTS
 class RedirectManager {
 private:
   string path;
   int original_fd = -1;
   int target_fd = -1;
   bool active = false;
+  bool is_appending = false;
+  int open_type = O_TRUNC; // Defult to truncation when opening file
 
 public:
   RedirectManager(const string& r_path, const string& symbol) : path(r_path) {
     if (path.empty()) return;
 
-    if (symbol == "2>") {
+    if (symbol.rfind("2") != string::npos) {
       target_fd = STDERR_FILENO;
     }
     else {
       target_fd = STDOUT_FILENO;
     }
 
+    if (symbol.rfind(">>") != string::npos) {
+      open_type = O_APPEND;
+    }
+    
     original_fd = dup(target_fd);
-    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | open_type, 0644);
     if (fd != -1) {
       dup2(fd, target_fd);
       close(fd);
@@ -73,6 +89,7 @@ public:
 
   int get_target_fd() const {return target_fd;}
   bool is_active() const {return active;}
+  int get_open_type() const {return open_type;}
   const string& get_path() const {return path;}
 };
 
@@ -117,15 +134,19 @@ static void handle_history(const vector<string>& args, ShellContext& shell_ctx);
 static void handle_exit(const vector<string>& args, ShellContext& shell_ctx); // wont use args
 static void handle_external_command(const string& command, const vector<string>& args, const RedirectManager& redirect);
 
+// helpers
 static void register_builtins(ShellContext& shell_ctx);
 static string find_in_path(const string& command);
 static bool is_executable(const fs::path& p);
 
+// ENTRY POINT
 int main() {
   // Flush after every std::cout / std:cerr
   cout << std::unitbuf;
   cerr << std::unitbuf;
 
+  // Create a single shell context instance for the entire run of the program
+  // Create the built-in commands list
   ShellContext shell_ctx;
   register_builtins(shell_ctx);
 
@@ -149,15 +170,8 @@ int main() {
   }
 }
 
-static void register_builtins(ShellContext& shell_ctx) {
-  shell_ctx.handlers["echo"] = handle_echo;
-  shell_ctx.handlers["type"] = handle_type;
-  shell_ctx.handlers["exit"] = handle_exit;
-  shell_ctx.handlers["pwd"] = handle_pwd;
-  shell_ctx.handlers["cd"] = handle_cd;
-  shell_ctx.handlers["history"] = handle_history;
-}
 
+// COMMAND HANDLERS
 static void handle_echo(const vector<string>& args, ShellContext& shell_ctx) {
   string output = "";
   for (size_t i = 0; i < args.size(); i++) {
@@ -260,10 +274,9 @@ static void handle_external_command(const string& command, const vector<string>&
   pid_t child_pid;
   cout.flush();
   child_pid = fork();
-
   if (child_pid == 0) {
     if (redirect.is_active()) {
-      int fd = open(redirect.get_path().c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      int fd = open(redirect.get_path().c_str(), O_WRONLY | O_CREAT | redirect.get_open_type(), 0644);
       dup2(fd, redirect.get_target_fd());
       close(fd);
     }
@@ -277,11 +290,77 @@ static void handle_external_command(const string& command, const vector<string>&
   }
 }
 
+// PARSERS AND TOKENIZERS
 static Command tokenize_and_parse(const string& input) {
   vector<Token> tokens = tokenize(input);
   return parse_tokens(tokens);
 };
 
+// Separates out the user string input into a list of words, or tokens by
+// finding delimiters; quotes, spaces, etc
+// it calls process_char for the handling of individual characters
+static vector<Token> tokenize(const string& input) {
+  vector<Token> tokens;
+  string current;
+  TokenizerState state;
+  for (int i = 0; i < input.size(); i++) {
+    char c = input[i];
+    char next = (i + 1 < input.size()) ? input[i + 1] : '\0';
+    char next_next = (i + 2 < input.size()) ? input[i + 2] : '\0';
+
+    if (!state.in_single_quote && !state.in_double_quote && !state.escape_next) {
+      
+      if ((c == '1' || c == '2') && next == '>') {
+        if (!current.empty()) {
+          tokens.push_back({current, false});
+          current.clear();
+        }
+        string op;
+        op += c;
+        op += '>';
+        if (next_next == '>') { // Overwrite Symbol
+          op += '>'; // Append Symbol
+          i++;
+        }
+        tokens.push_back({op, true});
+        i++;
+        continue;
+      }
+
+      if (c == '>') {
+        if (!current.empty()) {
+          tokens.push_back({current, false});
+          current.clear();
+        }
+        if (next == '>') {
+          tokens.push_back({">>", true}); // Append Symbol
+          i++;
+        } else {
+          tokens.push_back({">", true}); // Overwrite Symbol
+        }
+        continue;
+      }
+    }
+
+    bool was_appened = process_char(c, next, current, state);
+
+    if (!was_appened && !current.empty()) {
+      tokens.push_back({current, false});
+      current.clear();
+    }
+  }
+
+  if (!current.empty()) {
+    tokens.push_back({current, false});
+  }
+
+  return tokens;
+}
+
+// This function is called by tokenize and processes every individual char
+// Returns true or false depending if it was added to the current token
+// True: added to current token
+// False: NOT added to current token (delimiter)
 static bool process_char(char c, char next_char, string& current_token, TokenizerState& state) {
   // Here we are escaping the current char
   if (state.escape_next) {
@@ -296,6 +375,7 @@ static bool process_char(char c, char next_char, string& current_token, Tokenize
       return true;
     }
     // If not in any quotes or being escaped then it acts as a delimiter
+    // exit function as false
     return false;
   }
 
@@ -341,54 +421,8 @@ static bool process_char(char c, char next_char, string& current_token, Tokenize
   return true;
 }
 
-static vector<Token> tokenize(const string& input) {
-  vector<Token> tokens;
-  string current;
-  TokenizerState state;
-  for (int i = 0; i < input.size(); i++) {
-    char c = input[i];
-    char next = (i + 1 < input.size()) ? input[i + 1] : '\0';
-
-    if (!state.in_single_quote && !state.in_double_quote && !state.escape_next) {
-
-      if ((c == '1' || c == '2') && next == '>') {
-        if (!current.empty()) {
-          tokens.push_back({current, false});
-          current.clear();
-        }
-        string op;
-        op += c;
-        op += '>';
-        tokens.push_back({op, true});
-        i++;
-        continue;
-      }
-
-      if (c == '>') {
-        if (!current.empty()) {
-          tokens.push_back({current, false});
-          current.clear();
-        }
-        tokens.push_back({">", true});
-        continue;
-      }
-    }
-
-    bool was_appened = process_char(c, next, current, state);
-
-    if (!was_appened && !current.empty()) {
-      tokens.push_back({current, false});
-      current.clear();
-    }
-  }
-
-  if (!current.empty()) {
-    tokens.push_back({current, false});
-  }
-
-  return tokens;
-}
-
+// After receiving user input in the form of a list (tokens), this function parses that list
+// into; command, arguments, redirect symbol, and redirect path
 static Command parse_tokens(const vector<Token>& tokens) {
   Command cmd;
   bool expect_redirect_path = false;
@@ -417,6 +451,20 @@ static Command parse_tokens(const vector<Token>& tokens) {
   return cmd;
 }
 
+// HELPER FUNCTIONS
+static void register_builtins(ShellContext& shell_ctx) {
+  shell_ctx.handlers["echo"] = handle_echo;
+  shell_ctx.handlers["type"] = handle_type;
+  shell_ctx.handlers["exit"] = handle_exit;
+  shell_ctx.handlers["pwd"] = handle_pwd;
+  shell_ctx.handlers["cd"] = handle_cd;
+  shell_ctx.handlers["history"] = handle_history;
+}
+
+// Primarily is designed to locate executables
+// Gets our PATH variable and seraches the list of directories in PATH
+// for an executable matching the string command
+// commands like ls and cat utilize this function in order to be found
 static string find_in_path(const string& command) {
   const string path = getenv("PATH");
   istringstream path_stream(path);
