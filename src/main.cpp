@@ -1,10 +1,16 @@
-// C and POSIX Headers/Libraries
+// C, POSIX, GNU Headers/Libraries
 #include <stdlib.h> // chdir(), 
 #include <errno.h>
 #include <sys/wait.h> // waitpid(),
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h> // STDERR, STDOUT
+// Readline automates a lot of the work it has:
+// builtin button support
+// automatically tracks history
+// auto complete for files (need to register a new function or commands)
+#include <readline/readline.h>
+#include <readline/history.h>
 
 // C++ Headers/Libraries
 #include <iostream>
@@ -119,6 +125,15 @@ struct Token {
   bool is_redirect_op = false;
 };
 
+const vector<string>& commands = {
+  "echo",
+  "type",
+  "pwd",
+  "cd",
+  "hist",
+  "exit"
+};
+
 // Tokenizers and parsers
 static Command tokenize_and_parse(const string& input);
 static bool process_char(char c, char next_char, string& current_token, TokenizerState& state);
@@ -139,26 +154,59 @@ static void register_builtins(ShellContext& shell_ctx);
 static string find_in_path(const string& command);
 static bool is_executable(const fs::path& p);
 
+char* command_generator(const char* text, int state) {
+  static size_t index;
+  static size_t len;
+
+  if (state == 0) {
+    index = 0;
+    len = strlen(text);
+  }
+
+  while (index < commands.size()) {
+    const std::string& cmd = commands[index++];
+    if (cmd.compare(0, len, text) == 0) {
+      return strdup(cmd.c_str());
+    }
+  }
+  return nullptr;
+}
+
+char** command_completion(const char* text, int start, int end) {
+  if (start == 0) {
+    
+    return rl_completion_matches(text, command_generator);
+  }
+
+  return nullptr;
+}
+
 // ENTRY POINT
 int main() {
   // Flush after every std::cout / std:cerr
   cout << std::unitbuf;
   cerr << std::unitbuf;
 
+  rl_attempted_completion_function = command_completion;
+
   // Create a single shell context instance for the entire run of the program
   // Create the built-in commands list
   ShellContext shell_ctx;
   register_builtins(shell_ctx);
-
+  using_history();
   // REPL Loop
   while (!shell_ctx.is_done) {
-    
-    cout << "$ ";
     string input_string;
-    std::getline(cin, input_string);
+    char* line;
+    line = readline("$ ");
+    if (!line) {
+      continue;
+    }
+    add_history(line);
+    input_string = string(line); // Convert the const char * to string to be compatible with existing code
     Command cmd = tokenize_and_parse(input_string);
     
-    shell_ctx.command_history.push_back(input_string);
+    shell_ctx.command_history.push_back(input_string); // Obsolete; readline automatically saves history
     RedirectManager redirect(cmd.redirect_path, cmd.redirect_symbol);
 
     auto it = shell_ctx.handlers.find(cmd.name);
@@ -167,6 +215,7 @@ int main() {
     } else {
       handle_external_command(cmd.name, cmd.args, redirect);
     }
+    free(line); // Readline uses malloc so manual mempry freeing is required
   }
 }
 
@@ -230,6 +279,8 @@ static void handle_pwd(const vector<string>& args, ShellContext& shell_ctx) {
 }
 
 static void handle_history(const vector<string>& args, ShellContext& shell_ctx) {
+  // TODO: Change to use readline history functionality instead of manually
+  // saving to a vector
   // ***try - except might be a good idea here
   int start = 0;
   if (args.size() > 0) {
